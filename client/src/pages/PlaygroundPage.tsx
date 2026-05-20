@@ -138,24 +138,25 @@ export default function PlaygroundPage() {
     setLoading(true)
     inputRef.current?.focus()
 
+    const start = Date.now()
+
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (keyData?.apiKey) headers['Authorization'] = `Bearer ${keyData.apiKey}`
 
-      const body: { messages: { role: string; content: string }[]; model?: string } = {
+      const body: { messages: { role: string; content: string }[]; model?: string; stream: boolean } = {
         messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+        stream: true,
       }
       if (activeThread.model !== 'auto') body.model = activeThread.model
 
       const base = import.meta.env.BASE_URL.replace(/\/$/, '')
-      const start = Date.now()
       const res = await fetch(`${base}/v1/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
       })
 
-      const latency = Date.now() - start
       const routedVia = res.headers.get('X-Routed-Via')
       const fallbackAttempts = res.headers.get('X-Fallback-Attempts')
 
@@ -167,21 +168,52 @@ export default function PlaygroundPage() {
         return
       }
 
-      const data = await res.json()
-      const content = data.choices?.[0]?.message?.content ?? JSON.stringify(data, null, 2)
-      const via = data._routed_via ?? (routedVia ? {
+      // Insert streaming placeholder so the bubble appears immediately
+      patchThread(threadId, { messages: [...newMessages, { role: 'assistant', content: '' }] })
+
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let streamContent = ''
+
+      stream: while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const payload = line.slice(6).trim()
+          if (payload === '[DONE]') break stream
+
+          try {
+            const chunk = JSON.parse(payload)
+            if (chunk.error) {
+              streamContent += `\n[Error: ${chunk.error.message}]`
+            } else {
+              streamContent += chunk.choices?.[0]?.delta?.content ?? ''
+            }
+            patchThread(threadId, { messages: [...newMessages, { role: 'assistant', content: streamContent }] })
+          } catch { /* skip malformed chunk */ }
+        }
+      }
+
+      const via = routedVia ? {
         platform: routedVia.split('/')[0],
         model: routedVia.split('/').slice(1).join('/'),
-      } : undefined)
+      } : undefined
 
       patchThread(threadId, {
         messages: [...newMessages, {
           role: 'assistant',
-          content,
+          content: streamContent,
           meta: {
             platform: via?.platform,
             model: via?.model,
-            latency,
+            latency: Date.now() - start,
             fallbackAttempts: fallbackAttempts ? parseInt(fallbackAttempts) : undefined,
           },
         }],
