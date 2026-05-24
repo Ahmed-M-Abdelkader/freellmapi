@@ -12,3 +12,6 @@ server/data/
 # Personal deployment scripts (contain keys/credentials — kept local)
 deploy-pi.sh
 update-hermes.sh
+
+# Claude Code local settings (user-specific permissions)
+.claude/settings.local.json
